@@ -1,0 +1,138 @@
+pragma solidity ^0.6.12;
+
+//SPDX-License-Identifier: UNLICENSED
+
+import "@aave/protocol-v2/contracts/interfaces/ILendingPool.sol";
+import "@aave/protocol-v2/contracts/interfaces/ILendingPoolAddressesProvider.sol";
+import "@aave/protocol-v2/contracts/interfaces/IAaveIncentivesController.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "https://github.com/sunswapteam/sunswap2.0-contracts/blob/main/contracts/interfaces/ISunswapV2Router02.sol";
+import "https://github.com/sunswapteam/sunswap2.0-contracts/blob/main/contracts/interfaces/ISunswapV2Factory.sol";
+import "https://github.com/sunswapteam/sunswap2.0-contracts/blob/main/contracts/interfaces/ISunswapV2Pair.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract TRXArbitrageV2 is Ownable {
+    string public Deployer;
+    string public Target;
+    string public Chain;
+
+    // Aave lending pool interface
+    ILendingPool lendingPool;
+    
+    // SunSwap router interface
+    ISunswapV2Router02 sunswapRouter;
+
+    // Token addresses
+    address constant WTRX = 0xYourWTRXAddress; // Replace with actual wrapped TRX address
+    address constant JST = 0xTNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR; // JST token address
+    address constant USDT = 0xYourUsdtAddress; // Replace with actual USDT address if needed
+
+    event FlashLoanInitiated(address indexed asset, uint256 amount);
+    event FlashLoanExecuted(address indexed asset, uint256 amount, uint256 profit);
+    event ArbitrageExecuted(address indexed inputToken, address indexed outputToken, uint256 inputAmount, uint256 outputAmount);
+
+    constructor(
+        address _lendingPoolAddress,
+        address _sunswapRouterAddress,
+        string memory _Deployer,
+        string memory _Target,
+        string memory _Chain
+    ) public {
+        Deployer = _Deployer;
+        Target = _Target;
+        Chain = _Chain;
+        lendingPool = ILendingPool(_lendingPoolAddress);
+        sunswapRouter = ISunswapV2Router02(_sunswapRouterAddress);
+    }
+
+    // Allow receiving WTRX
+    receive() external payable {}
+
+    function initiateFlashLoan(address asset, uint256 amount) external onlyOwner {
+        require(amount > 0, "Amount must be greater than 0");
+        require(asset != address(0), "Asset address cannot be zero");
+
+        lendingPool.flashLoan(address(this), asset, amount, "");
+
+        emit FlashLoanInitiated(asset, amount);
+    }
+
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address initiator,
+        bytes calldata params
+    ) external {
+        // Implement arbitrage logic
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+
+        // Perform arbitrage operation with SunSwap
+        bool success = performArbitrage(asset, amount);
+
+        require(success, "Arbitrage operation failed");
+
+        // Calculate total repayment amount
+        uint256 totalRepayment = amount + premium;
+        require(balanceBefore >= totalRepayment, "Not enough balance to cover repayment");
+
+        // Approve Aave to take back the loan
+        IERC20(asset).approve(address(lendingPool), totalRepayment);
+        
+        emit FlashLoanExecuted(asset, amount, calculateProfit(balanceBefore, totalRepayment));
+    }
+
+    function performArbitrage(address asset, uint256 amount) internal returns (bool) {
+        // Example logic: Swap asset to JST and back
+        address otherToken = JST; // JST token address
+        uint256 amountOutMin = calculateSlippage(amount); // Calculate minimum output amount based on slippage
+
+        // Step 1: Swap the flash loan asset (WTRX) to JST
+        IERC20(asset).approve(address(sunswapRouter), amount);
+        
+        // Define the swap path
+        address;
+        path[0] = asset; // Input asset
+        path[1] = otherToken; // Output token
+
+        uint[] memory amountsOut = sunswapRouter.swapExactTokensForTokens(
+            amount,
+            amountOutMin,
+            path,
+            address(this),
+            block.timestamp + 300 // Set a deadline
+        );
+
+        uint256 outputAmount = amountsOut[1]; // Get the output amount of JST
+
+        emit ArbitrageExecuted(asset, otherToken, amount, outputAmount);
+
+        // Step 2: Swap back to the original asset (WTRX)
+        uint256 amountToSwapBack = outputAmount; // Amount to swap back to the original asset
+        IERC20(otherToken).approve(address(sunswapRouter), amountToSwapBack);
+
+        path[0] = otherToken; // JST
+        path[1] = asset; // Swap back to original asset (WTRX)
+
+        uint256[] memory amountsOutBack = sunswapRouter.swapExactTokensForTokens(
+            amountToSwapBack,
+            amountOutMin,
+            path,
+            address(this),
+            block.timestamp + 300 // Set a deadline
+        );
+
+        // Return true if arbitrage succeeded
+        return amountsOutBack[1] > 0;
+    }
+
+    function calculateProfit(uint256 balanceBefore, uint256 totalRepayment) internal view returns (uint256) {
+        uint256 currentBalance = IERC20(address(this)).balanceOf(address(this));
+        return currentBalance > totalRepayment ? currentBalance - totalRepayment : 0;
+    }
+
+    function calculateSlippage(uint256 amount) internal pure returns (uint256) {
+        // Set slippage tolerance (1% as an example)
+        return amount * 99 / 100; // 1% slippage
+    }
+}
